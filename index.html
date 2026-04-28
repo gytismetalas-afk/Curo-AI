@@ -1,318 +1,278 @@
-<!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>Curo AI</title>
-        <link rel="stylesheet" href="style.css">
-        <link rel="manifest" href="manifest.json">
-        <meta name="theme-color" content="#000000">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+/* ==========================================================================
+   CURO AI - OPTIMIZUOTAS SCRIPT.JS BRANDUOLYS
+   ========================================================================== */
 
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css" integrity="sha384-wcIxkf4k558AjM3Yz3BBFQUbk/zgIYC2R0QpeeYb+TwlBVMrlgLqwRjRtGZiK7ww" crossorigin="anonymous">
-        <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js" integrity="sha384-hIoBPJpTUs74ddyc4bFZSM1TVlQDA60VBbJS0oA934VSz82sBx1X7kSx2ATBDIyd" crossorigin="anonymous"></script>
+let geminiApiKey = localStorage.getItem('geminiApiKey') || '';
+let memoryAdditionsBlocked = false;
+let memoryLimitWarningShown = false;
+let disableMemory = false;
+let autoSaveEnabled = false;
+let currentChatId = null;
+let conversationHistory = [];
+let isTitleBeingGenerated = false;
+
+// DOM Elementai
+const chatMessages = document.getElementById('chat-messages');
+const userInput = document.getElementById('user-input');
+const sendButton = document.getElementById('send-button');
+const chatTitleElement = document.getElementById('chatTitle');
+const historyList = document.getElementById('historyList');
+const body = document.body;
+
+// Duomenų bazės ir atminties konstantos
+const DB_NAME = 'Curo_chat_db';
+const CHATS_STORE_NAME = 'chats';
+const CONFIG_STORE_NAME = 'config';
+const FILES_STORE_NAME = 'chat_files';
+const MEMORY_KEY = 'Curo_ai_memory';
+const MESSAGES_PER_LOAD = 15;
+const MAX_SAVED_CHATS = 100;
+const MAX_MEMORY_TOKENS = 100000;
+let db;
+
+// Modelių nustatymai
+let currentModel = localStorage.getItem('selectedModel') || 'gemini-1.5-flash';
+let topP = 0.9;
+let temperature = 0.7;
+
+const defaultValues = {
+    'gemini-1.5-flash': { temperature: 0.7, topP: 0.9 },
+    'gemini-1.5-pro': { temperature: 0.7, topP: 0.9 },
+    'gemini-2.0-flash-thinking-exp-01-21': { temperature: 0.7, topP: 0.9 }
+};
+
+const safetySettings = [
+    { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+    { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+    { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+    { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" }
+];
+
+/* ==========================================================================
+   1. INICIALIZACIJA IR DUOMENŲ BAZĖ
+   ========================================================================== */
+document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        await initDB();
+        await loadConfigSettings();
         
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" />
-        <script src="https://code.jquery.com/jquery-3.7.1.min.js" integrity="sha256-/JqT3SQfawRcv/BIHPThkBvs0OEvtFFmqPF/lYI/Cxo=" crossorigin="anonymous"></script>
-        <style>
-            .history-loading-indicator {
-                display: none;
-                justify-content: center;
-                align-items: center;
-                padding: 20px;
-                color: #aaa;
-            }
+        // API rakto patikra
+        const apiKeyInput = document.getElementById('apiKeyInput');
+        if (geminiApiKey) apiKeyInput.value = geminiApiKey;
+        else {
+            document.getElementById('settingsPopup').classList.add('show');
+            console.warn("API Key missing.");
+        }
 
-            .history-loading-spinner {
-                border: 4px solid rgba(0, 0, 0, 0.1);
-                border-top-color: #777;
-                border-radius: 50%;
-                width: 30px;
-                height: 30px;
-                animation: spin 1s linear infinite;
-            }
+        renderHistoryList();
+        renderMemoryListForSettings();
+        setActiveModel(currentModel);
+    } catch (error) {
+        console.error("Initialization failed:", error);
+    }
+});
 
-            @keyframes spin {
-                to { transform: rotate(360deg); }
-            }
-        </style>
-    </head>
-    <body class="dark-mode">
-        <div class="top-toolbar" id="top-toolbar">
-            <button id="historyMenuButton" class="history-menu-button" title="Chat History">
-                <i class="fas fa-bars"></i>
-            </button>
-            <div class="logo-container" id="logo-container">
-                <img src="images/lighr.png" alt="CrypyAI Logo" class="logo light-mode-logo">
-                <img src="images/darkk.png" alt="CrypyAI Logo" class="logo dark-mode-logo">
-            </div>
-            <button id="settingsButton" class="settings-button" title="Settings">⚙</button>
-        </div>
+function initDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 2);
+        request.onerror = (e) => reject(e.target.errorCode);
+        request.onsuccess = (e) => { db = e.target.result; resolve(); };
+        request.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(CHATS_STORE_NAME)) db.createObjectStore(CHATS_STORE_NAME, { keyPath: 'chatId' });
+            if (!db.objectStoreNames.contains(CONFIG_STORE_NAME)) db.createObjectStore(CONFIG_STORE_NAME);
+            if (!db.objectStoreNames.contains(FILES_STORE_NAME)) db.createObjectStore(FILES_STORE_NAME, { keyPath: 'fileId', autoIncrement: true });
+        };
+    });
+}
+
+async function loadConfigSettings() {
+    try {
+        const autoSave = await getConfigValue('autoSaveEnabled');
+        autoSaveEnabled = autoSave === 'true';
+        document.getElementById('autoSaveToggle').checked = autoSaveEnabled;
+
+        const disableMem = await getConfigValue('disableMemory');
+        disableMemory = disableMem === 'true';
+        document.getElementById('disableMemoryToggle').checked = disableMemory;
         
-        <div class="settings-container">
-            <div id="settingsPopup" class="settings-popup">
-                <div class="setting-item">
-                    <label for="apiKeyInput" class="api-key-label">API Key: <span class="tooltip-icon">ⓘ</span>
-                        <span class="tooltip-text">Enter your Google Gemini API key. Your key is saved securely in your browser's local storage and is never sent to our servers.</span>
-                    </label>
-                    <div class="api-key-wrapper">
-                        <input type="password" id="apiKeyInput" placeholder="Enter your Gemini API Key">
-                        <button id="saveApiKeyButton">Save</button>
-                    </div>
-                </div>
-                <div class="setting-item">
-                    <label for="temperatureSlider">Randomness  <span class="tooltip-icon">ⓘ</span>
-                        <span class="tooltip-text">Controls the randomness of the output. Lower values are more predictable, higher values are more random.</span>
-                    </label>
-                    <input type="range" id="temperatureSlider" min="0" max="2" step="0.1" value="">
-                    <span id="temperatureValue"></span>
-                </div>
-                <div class="setting-item">
-                    <label for="topPSlider">Diversity‏‏‏ ‏ ‏ ‏ ‏  ‏ ‏ ‎ ‎ <span class="tooltip-icon">ⓘ</span>
-                        <span class="tooltip-text">Controls the diversity of the output. Lower values are more focused, higher values are more diverse.</span>
-                    </label>
-                    <input type="range" id="topPSlider" min="0" max="1" step="0.1" value="">
-                    <span id="topPValue"></span>
-                </div>
+        // Kiti krovimai gali eiti čia...
+    } catch (e) { console.error("Error loading config:", e); }
+}
 
-                <div class="setting-item">
-                    <label>Select AI Model: <span class="tooltip-icon" id="model-info-icon">ⓘ</span>
-                        <span class="tooltip-text">
-                            <p><b>Curo Flash:</b> Optimized for rapid text generation.</p>
-                            <p><b>Curo Thinking:</b> Built for deep dives.</p>
-                            <p><b>Curo Custom:</b> Use a custom instruction.</p>
-                            <p><b>Curo Image:</b> Generate images natively.</p>
-                        </span>
-                    </label>
-                    <div class="model-buttons">
-                        <button id="geminiFlashButton" class="model-button active">Curo Flash</button>
-                        <button id="gemini1206Button" class="model-button">Curo Thinking</button>
-                        <button id="geminiCustomButton" class="model-button">Curo Custom</button>
-                        <button id="geminiImageGenButton" class="model-button">Curo Image*</button>
-                    </div>
-                </div>
-                <div class="setting-item">
-                    <span class="toggle-label">Dark Mode</span>
-                    <label class="toggle-switch" for="darkModeToggle">
-                        <input type="checkbox" id="darkModeToggle" checked>
-                        <span class="slider">
-                            <span class="slider-icon sun">🌙</span>
-                            <span class="slider-icon moon">☀️</span>
-                        </span>
-                    </label>
-                </div>
+async function getConfigValue(key) {
+    return new Promise((resolve, reject) => {
+        if (!db) return reject("DB offline");
+        const request = db.transaction([CONFIG_STORE_NAME], 'readonly').objectStore(CONFIG_STORE_NAME).get(key);
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e.target.errorCode);
+    });
+}
 
-                <div class="setting-item">
-                    <span class="toggle-label">Auto-Save</span>
-                    <label class="toggle-switch" for="autoSaveToggle">
-                        <input type="checkbox" id="autoSaveToggle">
-                        <span class="slider"></span>
-                    </label>
-                </div>
-                <div class="setting-item">
-                    <span class="toggle-label">Disable Memory</span>
-                    <label class="toggle-switch" for="disableMemoryToggle">
-                        <input type="checkbox" id="disableMemoryToggle">
-                        <span class="slider"></span>
-                    </label>
-                </div>
+/* ==========================================================================
+   2. API LOGIKA IR BENDRAVIMAS SU MODELIU
+   ========================================================================== */
+async function getGeminiResponseStream(message, base64Image = null, fileData = null) {
+    if (!geminiApiKey) throw new Error("API Key is missing.");
+    
+    // Čia apsidraudžiame nuo senų klaidų
+    let modelName = currentModel;
+    if (modelName === 'gemini-2.0-flash' || modelName === 'gemini-2.0-flash-lite') modelName = 'gemini-1.5-flash';
+    if (modelName === 'gemini-2.5-flash-preview-04-17') modelName = 'gemini-1.5-pro';
 
-                <div id="switch-to-pro-popup" class="switch-to-pro-popup">
-                    <p>This question might be better handled by Curo Pro. <span id="info-icon-popup" class="info-icon-popup flashing">ⓘ</span></p>
-                </div>
-                 <div class="setting-item">
-                    <button id="faqsButton" class="popup-button">FAQs</button> <button id="aboutButton" class="popup-button">About</button>
-                </div>
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?key=${geminiApiKey}`;
+    
+    // Supaprastintas payload su konstanta `BLOCK_NONE`
+    let contents = [{ role: "user", parts: [{ text: message }] }];
+    
+    let data = {
+        contents: contents,
+        generationConfig: {
+            topP: topP,
+            temperature: temperature,
+            maxOutputTokens: 8192,
+        },
+        safetySettings: safetySettings
+    };
 
-            </div>
-        </div>
-      
-        <div class="chat-container" id="chatContainer">
-            <div class="chat-header">
-                <button id="saveChatButton" class="save-chat-button" title="Save Chat">
-                    <i class="fas fa-save"></i>
-                </button>
-                <h2 id="chatTitle">New Chat</h2>
-                <button id="newChatButton" class="new-chat-button" title="New Chat">
-                    <span class="material-symbols-outlined">add_comment</span>
-                </button>
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+    });
 
-                <button id="expandCustomInstructionButton" class="expand-button" title="Expand Custom Instruction" style="display: none;">
-                    <i class="fas fa-chevron-down"></i>
-                </button>
-            </div>
-            <div class="custom-instruction-container" style="display: none;">
-                <div class="custom-instruction-wrapper">
-                    <textarea id="customInstructionInput" placeholder="Enter your custom instruction here! (For a better roleplaying experience, use the !roleplay command.)"></textarea>
-                </div>
-            </div>
+    if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response;
+}
+/* ==========================================================================
+   3. VARTOTOJO SĄSAJA IR ŽINUČIŲ RENDERINIMAS
+   ========================================================================== */
 
-            <div class="chat-messages" id="chat-messages">
-            </div>
+function createMessageElement(sender, messageText, isDarkMode, fileId = null) {
+    const messageDiv = document.createElement('div');
+    messageDiv.classList.add('message', `${sender}-message`);
+    if (sender === 'user') messageDiv.classList.add('user-message');
+    else messageDiv.classList.add('gemini-message');
+    if (isDarkMode) messageDiv.classList.add('dark-mode');
 
-            <div class="input-area" id="inputArea">
-                <div id="image-attachment-area" style="display: none;">
-                    <img id="attached-image" src="" alt="Attached Image" style="max-height: 100px; max-width: 100%; border-radius: 5px;">
-                </div>
-                <div id="file-attachment-box" style="display: none; position: absolute; top: -110px; left: 15px; z-index: 21; pointer-events: none; align-items: center; justify-content: center; width: 95px; height: 95px; border: 2px dashed #777; border-radius: 5px; color: #777; font-size: 1em; flex-direction: column;">
-                    <i class="fas fa-file" style="font-size: 3em; margin-bottom: 5px;"></i>
-                    <span id="file-type-text">FILE</span>
-                    <span id="file-name-text"></span>  
-                </div>
-                <div id="camera-preview-area" style="display: none; position: absolute; top: -110px; left: 15px; z-index: 21; pointer-events: none; align-items: center; justify-content: center; flex-direction: column;">
-                    <video id="camera-preview" style="display: none;"></video>
-                    <canvas id="camera-canvas" style="display: none;"></canvas>
-                    <div id="camera-buttons" style="display: flex; margin-top: 5px;">
-                        <button id="cancel-camera-button">Cancel</button>
-                    </div>
-                </div>
+    // Supaprastintas markdown apdorojimas greičiui
+    let formattedText = messageText
+        .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+        .replace(/\*(.*?)\*/g, '<i>$1</i>')
+        .replace(/```([\s\S]*?)```/g, '<div class="code-block-container"><pre class="code-block-content"><code>$1</code></pre></div>')
+        .replace(/\n/g, '<br>');
 
-                <button id="remove-attachment-button-new" class="remove-attachment-button-new" style="display: none;" title="Remove Attachment" aria-label="Remove Attachment">
-                    <i class="fas fa-times"></i>
-                </button>
-                <div id="name-loader">
-                    <div class="typing-dot"></div>
-                    <div class="typing-dot"></div>
-                    <div class="typing-dot"></div>
-                </div>
-                <div id="memoryPanel">
-                    <div class="panel-header draggable">
-                        <h2>Manage Memory</h2>
-                    </div>
-                     <button id="closeMemoryPanelButton" class="close-panel-button" title="Close Memory Panel">
-                            <i class="fas fa-times"></i>
-                        </button>
-                    <div class="panel-content">
-                        <table id="memoryTable">
-                            <thead>
-                                <tr>
-                                    <th>Index</th>
-                                    <th>Content</th>
-                                    <th>Delete</th>
-                                </tr>
-                            </thead>
-                            <tbody id="memoryTableBody">
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            <button id="scroll-down-button" class="scroll-down-button" style="display: none;">
-                <i class="fas fa-chevron-down"></i>
-            </button>
+    if (messageText.startsWith('[Attached-File]:')) {
+        messageDiv.innerHTML = `<div class="file-attachment-box"><i class="fas fa-file"></i> ${messageText.split(':')[1]}</div>`;
+    } else if (messageText.startsWith('/imageURL[')) {
+        const base64 = messageText.substring(10, messageText.length - 1);
+        messageDiv.innerHTML = `<img src="${base64}" class="generated-image" style="max-width: 100%;">`;
+    } else {
+        messageDiv.innerHTML = formattedText;
+    }
 
-                <input type="file" id="image-upload" accept="image/*" style="display: none;">
-                <input type="file" id="file-upload" style="display: none;" accept="application/pdf, application/vnd.openxmlformats-officedocument.wordprocessingml.document, .docx, .doc, .txt, .csv, .rtf, application/vnd.ms-excel, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-powerpoint, application/vnd.openxmlformats-officedocument.presentationml.presentation, .pptx, .ppt, .mp3 , .mp4 , .webm , .webp">
+    return messageDiv;
+}
 
-                <button type="button" id="attach-image-button" >
-                    <i class="fas fa-paperclip"></i>
-                </button>
+function renderChatMessages() {
+    chatMessages.innerHTML = '';
+    const isDarkMode = body.classList.contains('dark-mode');
+    
+    conversationHistory.forEach(msg => {
+        if (msg.parts && msg.parts.length > 0) {
+            msg.parts.forEach(part => {
+                if (part.text) {
+                    chatMessages.appendChild(createMessageElement(msg.role, part.text, isDarkMode, part.fileId));
+                }
+            });
+        }
+    });
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
 
-                <label for="user-input">
-                    <textarea id="user-input" placeholder="Type your message..."></textarea>
-                </label>
-                <button id="send-button" class="input-action-button">
-                    <span id="send-button-icon">➤</span>
-                </button>
-                
-                <button id="mic-button-container" class="input-action-button">
-                    <i id="mic-button" class="fas fa-microphone"></i>
-                </button>
+/* ==========================================================================
+   4. ŽINUČIŲ SIUNTIMAS IR SRAUTAS (STREAMING)
+   ========================================================================== */
+async function sendMessage() {
+    if (!geminiApiKey) {
+        alert("Įvesk API raktą nustatymuose!");
+        document.getElementById('settingsPopup').classList.add('show');
+        return;
+    }
 
-                <div class="recording-indicator" id="recording-indicator" style="display: none;">
-                    <span class="pulsating-dot"></span>
-                    <button id="stop-recording-button">‎ ‎ ‎ Stop</button>
-                </div>
+    const message = userInput.value.trim();
+    // (Failų prisegimo logika laikinai praleista, ji bus kitoje dalyje)
+    if (!message) return; 
 
-                <div class="typing-indicator" id="typing-indicator">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                </div>
-            </div>
-        </div>
+    userInput.value = '';
+    userInput.style.height = '30px';
+    sendButton.disabled = true;
+    document.getElementById('typing-indicator').style.display = 'flex';
 
-        <div class="idebar" id="historySidebar">
-            <div class="history-header">
-                <h3>⠀Chat History</h3>
-                 <button id="importChatButton" class="import-chat-button" title="Import Chat">
-                    <i class="fas fa-file-import"></i> Import
-                </button>
-            </div>
-            <ul class="history-list" id="historyList">
-            </ul>
-           
-            <button id="manageMemoryButton" title="Manage Memory">
-                <i class="fas fa-brain"></i> Manage Memory
-            </button>
+    // Pridedame vartotojo žinutę į istoriją ir ekraną
+    conversationHistory.push({ role: "user", parts: [{ text: message }] });
+    chatMessages.appendChild(createMessageElement('user', message, body.classList.contains('dark-mode')));
+    chatMessages.scrollTop = chatMessages.scrollHeight;
 
-            <div id="aboutPopup" class="popup">
-                <div class="popup-content">
-                    <button id="closeAboutPopup" class="close-popup-button">
-                        <i class="fas fa-chevron-down"></i>
-                    </button>
-                    <div id="aboutContent"></div>
-                </div>
-            </div>
-            <div id="faqsPopup" class="popup">
-                <div class="popup-content">
-                    <button id="closeFAQsPopup" class="-popup-button">
-                        <i class="fas fa-chevron-down"></i>
-                    </button>
-                    <h2>FAQs</h2>
-                    <div id="faqsContent"></div>
-                </div>
-            </div>
-            <div id="memoryPopup" class="popup"> 
-                <div class="popup-content">
-                    <button id="closeMemoryPopup" class="close-popup-button">
-                        <i class="fas fa-chevron-down"></i>
-                    </button>
-                    <h2>Memory Points</h2>
-                    <ul id="memoryListForSettings" class="memory-list-settings">
-                    </ul>
-                </div>
-            </div>
-            <button id="closeHistoryButton" class="close-history-button" title="Close History">
-                <i class=" "></i>
-            </button>
-             <input type="file" id="chatFileInput" style="display: none;" accept=".txt">
-        </div>
+    try {
+        const response = await getGeminiResponseStream(message);
+        await handleDefaultStream(response);
+    } catch (error) {
+        console.error('Klaida siunčiant:', error);
+        chatMessages.appendChild(createMessageElement('gemini', 'Atsiprašau, įvyko klaida gaunant atsakymą.', body.classList.contains('dark-mode')));
+    } finally {
+        document.getElementById('typing-indicator').style.display = 'none';
+        sendButton.disabled = false;
+        if (autoSaveEnabled) saveCurrentChat();
+    }
+}
 
-        <script>
-            if ("serviceWorker" in navigator) {
-                window.addEventListener("load", () => {
-                    navigator.serviceWorker
-                        .register("/service-worker.js")
-                        .then((registration) => {})
-                        .catch((error) => {
-                            console.error("Service Worker registration failed:", error);
-                        });
-                });
+async function handleDefaultStream(response) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullResponse = "";
+    
+    const isDarkMode = body.classList.contains('dark-mode');
+    const msgDiv = createMessageElement('gemini', '', isDarkMode);
+    chatMessages.appendChild(msgDiv);
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            
+            const chunk = decoder.decode(value, { stream: true });
+            
+            // Švarus ir greitas JSON srauto parsinimas
+            const lines = chunk.split('\n');
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.substring(6));
+                        if (data.candidates && data.candidates[0].content.parts[0].text) {
+                            fullResponse += data.candidates[0].content.parts[0].text;
+                            msgDiv.innerHTML = fullResponse
+                                .replace(/\*\*(.*?)\*\*/g, '<b>$1</b>')
+                                .replace(/\n/g, '<br>');
+                            chatMessages.scrollTop = chatMessages.scrollHeight;
+                        }
+                    } catch (e) { /* Ignoruojame nepilnus JSON blokus */ }
+                }
             }
-        </script>
-        
-        <script>
-            (function() {
-                // Šis skriptas perima užklausas į Google API ir pakeičia senus modelių pavadinimus 
-                // į naujausius, stabilius Gemini modelius, kad išvengtume 404/403 klaidų.
-                const originalFetch = window.fetch;
-                window.fetch = async function() {
-                    let args = arguments;
-                    if (typeof args[0] === 'string' && args[0].includes('generativelanguage.googleapis.com')) {
-                        // Pataisome URL esančius neteisingus modelių pavadinimus iš script.js
-                        args[0] = args[0].replace('gemini-2.5-flash-preview-04-17', 'gemini-1.5-pro');
-                        args[0] = args[0].replace('gemini-2.0-flash-lite', 'gemini-1.5-flash');
-                        args[0] = args[0].replace('gemini-2.0-flash-exp-image-generation', 'gemini-1.5-pro');
-                        args[0] = args[0].replace('gemini-2.0-flash', 'gemini-1.5-flash');
-                    }
-                    return originalFetch.apply(this, args);
-                };
-                console.log("Curo AI Interceptor: API modelių pataisymai sėkmingai pritaikyti!");
-            })();
-        </script>
+        }
+        conversationHistory.push({ role: "model", parts: [{ text: fullResponse }] });
+    } finally {
+        reader.releaseLock();
+    }
+}
 
-        <noscript>you need to enable JavaScript to run this app.</noscript>
-        <script src="script.js"></script>
-      
-    </body>
-</html>
+// Baziniai įvykių klausytojai
+sendButton.addEventListener('click', sendMessage);
+userInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage();
+    }
+});
